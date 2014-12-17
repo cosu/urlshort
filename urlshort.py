@@ -13,9 +13,6 @@ import time
 
 GOOGLE_API_KEY = None
 
-BACKOFF = 0
-SUCCESS_BACKOFF = 0
-
 # db.urls.find({"longUrl" : {$regex : "pass"}}).sort({"created":-1})
 
 def gen():
@@ -60,9 +57,27 @@ def get_and_insert(collection, token):
 
 
 def worker(token_queue, collection):
+    retry_sleep = 0
+    success_backoff = 0
     while True:
         token = queue.get()
-        get_and_insert(collection, token)
+        # rate limit
+        code = get_and_insert(collection, token)
+        if code == 403:
+            #increment sleep for
+
+            retry_sleep += 1
+            logger.debug("increased sleep to %s" % retry_sleep)
+
+        if code == 200:
+            if retry_sleep > 0:
+                success_backoff += 1
+                if success_backoff > 10:
+                    success_backoff = 0
+                    retry_sleep = 0
+
+        time.sleep(retry_sleep)
+
         token_queue.task_done()
 
 
@@ -94,7 +109,7 @@ if __name__ == '__main__':
 
     queue = Queue()
 
-    for _ in range(10000):
+    for _ in range(1000):
         queue.put(next(gen()))
 
     for _ in range(8):
