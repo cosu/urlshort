@@ -1,3 +1,5 @@
+from Queue import Queue
+
 __author__ = 'cdumitru'
 
 import random
@@ -5,12 +7,11 @@ import string
 import requests
 from pymongo import MongoClient
 from threading import Thread
-import ConfigParser, os
+import ConfigParser
+import logging
 import time
 
-
-TASK_COUNT = 10000
-GOOGLE_API_KEY = ''
+GOOGLE_API_KEY = None
 
 BACKOFF = 0
 SUCCESS_BACKOFF = 0
@@ -18,65 +19,89 @@ SUCCESS_BACKOFF = 0
 # db.urls.find({"longUrl" : {$regex : "pass"}}).sort({"created":-1})
 
 def gen():
-    size = 5
-    chars = string.ascii_uppercase + string.digits + string.ascii_lowercase
-    TASK_COUNT = 1000
-    i = 0
+    """
+    Generates random <size> strings containing lower, upper and digits
+    :return: the string
+    :rtype: str
 
-    while i < TASK_COUNT:
-        i += 1
+
+    """
+    size = 6
+    chars = string.ascii_uppercase + string.digits + string.ascii_lowercase
+    while True:
         yield ''.join(random.choice(chars) for _ in range(size))
 
 
-def get(collection):
-    global BACKOFF
-    global SUCCESS_BACKOFF
+def get_and_insert(collection, token):
+    """
+    Resolves the short url and if successful saves the result to mongo
+    :param collection: the collection where to save the restul
+    :param token: the url token to resolve
+    :return: the HTTP status code of the get operation. If > 200 then it was unsuccessful
+    """
 
-    token = next(gen())
+    url = 'https://www.googleapis.com/urlshortener/v1/url?shortUrl=http://goo.gl/%s&projection=FULL&key=%s' % (
+    token, GOOGLE_API_KEY)
 
-    while token:
-        url = 'https://www.googleapis.com/urlshortener/v1/url?shortUrl=http://goo.gl/%s&projection=FULL&key=%s' % (
-        token, GOOGLE_API_KEY)
+    r = requests.get(url)
 
-        r = requests.get(url)
+    if r.status_code < 300:
+        response = r.json()
+        collection.insert(response)
+        if response['status'] == 'OK':
+            logger.debug(" %s: %s " % (token, response['longUrl']))
 
-        if r.status_code < 300:
-            response = r.json()
-            collection.insert(response)
-            if response['status'] == 'OK':
-                print token, response['longUrl']
-            if BACKOFF > 1:
-                SUCCESS_BACKOFF += 1
+    else:
 
-            if SUCCESS_BACKOFF > 10:
-                BACKOFF = 0
-                SUCCESS_BACKOFF = 0
+        if r.status_code != 404:
+            logger.debug("Error resolving %s : %s" % (url, r.text))
+
+    return r.status_code
 
 
-        else:
-            print r.text
+def worker(token_queue, collection):
+    while True:
+        token = queue.get()
+        get_and_insert(collection, token)
+        token_queue.task_done()
 
-            if r.status_code == 403:
-                BACKOFF += 1
-                print "backoff %s" % BACKOFF
-
-        time.sleep(BACKOFF)
-        token = next(gen())
 
 
 if __name__ == '__main__':
-    client = MongoClient()
-    db = client.URLShort
-    url_collection = db.urls
 
+    # config stuff
     config = ConfigParser.ConfigParser()
     config.read('urlshort.cfg')
     GOOGLE_API_KEY = config.get('keys', 'GOOGLE_API_KEY')
 
-    for i in range(8):
-        t = Thread(target=get, args=(url_collection,))
+    # logging
+    logger = logging.getLogger("urlshort")
+    logger.setLevel(logging.DEBUG)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.DEBUG)
+    ch.setFormatter(formatter)
+    logger.addHandler(ch)
+
+
+    #mongo
+    client = MongoClient()
+    db = client.URLShort
+    url_collection = db.urls
+
+
+    #queue
+
+    queue = Queue()
+
+    for _ in range(10000):
+        queue.put(next(gen()))
+
+    for _ in range(8):
+        t = Thread(target=worker, args=(queue, url_collection))
+        t.daemon = True
         t.start()
 
-        # for _ in range(TASK_COUNT):
-        #     get(url_collection)
+    queue.join()
+
 
