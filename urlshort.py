@@ -13,7 +13,7 @@ import time
 
 GOOGLE_API_KEY = None
 
-# db.urls.find({"longUrl" : {$regex : "pass"}}).sort({"created":-1})
+# db.urls.find({"longUrl" : {$regex : ""}}).sort({"created":-1})
 
 def gen():
     """
@@ -57,6 +57,13 @@ def get_and_insert(collection, token):
 
 
 def worker(token_queue, collection):
+    """
+    Main worker loop. In case of API errors the worker backs off and sleeps. The sleep interval is reduced only if
+    the requests no longer fail.
+    :param token_queue: the queue from where the tokens are read by each worker
+    :param collection: the mongodb collection where the result is saved
+    :return: nothing
+    """
     retry_sleep = 0
     success_backoff = 0
     while True:
@@ -64,7 +71,7 @@ def worker(token_queue, collection):
         # rate limit
         code = get_and_insert(collection, token)
         if code == 403:
-            #increment sleep for
+            # increment sleep
 
             retry_sleep += 1
             logger.debug("increased sleep to %s" % retry_sleep)
@@ -75,6 +82,9 @@ def worker(token_queue, collection):
                 if success_backoff > 10:
                     success_backoff = 0
                     retry_sleep = 0
+
+        if code != 200:
+            queue.put(token)
 
         time.sleep(retry_sleep)
 
@@ -109,7 +119,7 @@ if __name__ == '__main__':
 
     queue = Queue()
 
-    for _ in range(1000):
+    for _ in range(10000):
         queue.put(next(gen()))
 
     for _ in range(8):
