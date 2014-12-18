@@ -11,9 +11,13 @@ from threading import Thread
 import ConfigParser
 import logging
 import time
-import signal
-import sys
 import threading
+
+
+TOKEN_LENGTH = 6
+
+URL_COUNT = 10000  # number of URLS to resolve
+THREAD_COUNT = 20  # number of threads to start
 
 GOOGLE_API_KEY = None
 SLEEP_DELAY = 0
@@ -21,21 +25,24 @@ SLEEP_DELAY = 0
 lock = threading.Lock()
 
 
-def gen():
+def gen(size):
     """
     Generates random <size> strings containing lower, upper and digits
+    :param: the length of the random string
+    :type: int
     :return: the string
     :rtype: str
-
-
     """
-    size = 6
     chars = string.ascii_uppercase + string.digits + string.ascii_lowercase
     while True:
         yield ''.join(random.choice(chars) for _ in range(size))
 
 
 def inc_delay():
+    """
+    increases the global delay counter with a random value
+    :return: nothing
+    """
     global SLEEP_DELAY
     with lock:
         SLEEP_DELAY += random.randint(1, 10)
@@ -43,6 +50,10 @@ def inc_delay():
 
 
 def dec_delay():
+    """
+    decreases the global delay counter with a smaller random value
+    :return: nothing
+    """
     global SLEEP_DELAY
     with lock:
         SLEEP_DELAY -= random.randint(1, 3)
@@ -61,7 +72,7 @@ def get_and_insert(collection, token):
     """
 
     url = 'https://www.googleapis.com/urlshortener/v1/url?shortUrl=http://goo.gl/%s&projection=FULL&key=%s' % (
-    token, GOOGLE_API_KEY)
+        token, GOOGLE_API_KEY)
 
     r = requests.get(url, timeout=103)
 
@@ -85,7 +96,9 @@ def worker(token_queue, collection, id):
     the requests no longer fail.
     :param token_queue: the queue from where the tokens are read by each worker
     :param collection: the mongodb collection where the result is saved
+    :param
     :param id: the id of the worker
+    :type: int
     :return: nothing
     """
     counter = Counter()
@@ -116,45 +129,37 @@ def worker(token_queue, collection, id):
             logger.debug("%i %s" % (id, counter))
 
 
-def signal_handler(signal, frame):
-    print('You pressed Ctrl+C!')
-    sys.exit(0)
-
 if __name__ == '__main__':
 
-    # config stuff
-    config = ConfigParser.ConfigParser()
-    config.read('urlshort.cfg')
-    GOOGLE_API_KEY = config.get('keys', 'GOOGLE_API_KEY')
+    # config stuff if no key provided
+    if not GOOGLE_API_KEY:
+        config = ConfigParser.ConfigParser()
+        config.read('urlshort.cfg')
+        GOOGLE_API_KEY = config.get('keys', 'GOOGLE_API_KEY')
 
     # logging
     logger = logging.getLogger("urlshort")
     logger.setLevel(logging.DEBUG)
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    ch = logging.StreamHandler()
-    ch.setLevel(logging.DEBUG)
-    ch.setFormatter(formatter)
-    logger.addHandler(ch)
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.DEBUG)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
 
-
-    #mongo
+    # mongo
     client = MongoClient()
     db = client.URLShort
     url_collection = db.urls
 
-    # signal
-    signal.signal(signal.SIGTERM, signal_handler)
-
-
-    #queue
+    # queue
 
     queue = Queue()
 
-    for _ in range(10000):
-        queue.put(next(gen()))
+    for _ in range(URL_COUNT):
+        queue.put(next(gen(TOKEN_LENGTH)))
 
-    for id in range(20):
-        t = Thread(target=worker, args=(queue, url_collection, id))
+    for tid in range(THREAD_COUNT):
+        t = Thread(target=worker, args=(queue, url_collection, tid))
         t.daemon = True
         t.start()
 
