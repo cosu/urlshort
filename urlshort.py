@@ -1,4 +1,5 @@
 from Queue import Queue
+from collections import Counter
 
 __author__ = 'cdumitru'
 
@@ -10,10 +11,15 @@ from threading import Thread
 import ConfigParser
 import logging
 import time
+import signal
+import sys
+import threading
 
 GOOGLE_API_KEY = None
+SLEEP_DELAY = 0
 
-# db.urls.find({"longUrl" : {$regex : ""}}).sort({"created":-1})
+lock = threading.Lock()
+
 
 def gen():
     """
@@ -29,6 +35,23 @@ def gen():
         yield ''.join(random.choice(chars) for _ in range(size))
 
 
+def inc_delay():
+    global SLEEP_DELAY
+    with lock:
+        SLEEP_DELAY += random.randint(1, 10)
+        logger.debug("increased sleep to %s" % SLEEP_DELAY)
+
+
+def dec_delay():
+    global SLEEP_DELAY
+    with lock:
+        SLEEP_DELAY -= random.randint(1, 3)
+
+        if SLEEP_DELAY < 0:
+            SLEEP_DELAY = 0
+        logger.debug("decreased sleep to %s" % SLEEP_DELAY)
+
+
 def get_and_insert(collection, token):
     """
     Resolves the short url and if successful saves the result to mongo
@@ -40,7 +63,7 @@ def get_and_insert(collection, token):
     url = 'https://www.googleapis.com/urlshortener/v1/url?shortUrl=http://goo.gl/%s&projection=FULL&key=%s' % (
     token, GOOGLE_API_KEY)
 
-    r = requests.get(url)
+    r = requests.get(url, timeout=103)
 
     if r.status_code < 300:
         response = r.json()
@@ -56,41 +79,46 @@ def get_and_insert(collection, token):
     return r.status_code
 
 
-def worker(token_queue, collection):
+def worker(token_queue, collection, id):
     """
     Main worker loop. In case of API errors the worker backs off and sleeps. The sleep interval is reduced only if
     the requests no longer fail.
     :param token_queue: the queue from where the tokens are read by each worker
     :param collection: the mongodb collection where the result is saved
+    :param id: the id of the worker
     :return: nothing
     """
-    retry_sleep = 0
-    success_backoff = 0
+    counter = Counter()
+
     while True:
         token = queue.get()
-        # rate limit
+
+        counter['total'] += 1
+
         code = get_and_insert(collection, token)
+
         if code == 403:
-            # increment sleep
+            inc_delay()
 
-            retry_sleep += 1
-            logger.debug("increased sleep to %s" % retry_sleep)
-
-        if code == 200:
-            if retry_sleep > 0:
-                success_backoff += 1
-                if success_backoff > 10:
-                    success_backoff = 0
-                    retry_sleep = 0
-
-        if code != 200:
+        if code == 200 or code == 404:
+            if SLEEP_DELAY > 0:
+                dec_delay()
+        else:
             queue.put(token)
 
-        time.sleep(retry_sleep)
+        counter[code] += 1
+
+        time.sleep(SLEEP_DELAY)
 
         token_queue.task_done()
 
+        if counter['total'] % 100 == 0:
+            logger.debug("%i %s" % (id, counter))
 
+
+def signal_handler(signal, frame):
+    print('You pressed Ctrl+C!')
+    sys.exit(0)
 
 if __name__ == '__main__':
 
@@ -114,6 +142,9 @@ if __name__ == '__main__':
     db = client.URLShort
     url_collection = db.urls
 
+    # signal
+    signal.signal(signal.SIGTERM, signal_handler)
+
 
     #queue
 
@@ -122,8 +153,8 @@ if __name__ == '__main__':
     for _ in range(10000):
         queue.put(next(gen()))
 
-    for _ in range(8):
-        t = Thread(target=worker, args=(queue, url_collection))
+    for id in range(20):
+        t = Thread(target=worker, args=(queue, url_collection, id))
         t.daemon = True
         t.start()
 
